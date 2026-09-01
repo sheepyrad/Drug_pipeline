@@ -75,13 +75,29 @@ This starts:
 - Electron main process
 - local runner service (started by Electron on app boot)
 
-### Web-only mode
+### Web mode (browser + local runner)
 
 ```bash
 bun run dev:web
 ```
 
-This is useful for UI development, but training/run operations require the local runner service and local CGFlow setup.
+This starts:
+- Vite web UI (`dev:web:ui`)
+- local runner service (`dev:runner`) on `http://127.0.0.1:45731` by default
+
+Use this when developing in the browser without Electron. The UI talks to the runner over HTTP, not IPC.
+
+For UI-only development without the runner:
+
+```bash
+bun run dev:web:ui
+```
+
+Web mode does not expose the browser filesystem to the runner. Type runner-local input/output paths in the Configuration form, or use Convex uploads (`convex://...`) where supported.
+
+For npm/Node environments without Bun, run the runner with `npx tsx electron/runner.ts` instead of `bun run dev:runner`.
+
+Training/run operations still require the local CGFlow setup, conda envs, and filesystem access on the machine running the runner.
 
 ### npm fallback
 
@@ -179,7 +195,12 @@ CGFlow writes run outputs into the configured `result_dir`, including:
 ## Troubleshooting
 
 - **Runner unavailable / cannot start runs**
-  - Ensure Electron app is running (desktop mode) or runner service is reachable at `VITE_RUNNER_URL`.
+  - In web mode, run `bun run dev:web` (UI + runner) or start the runner separately with `bun run dev:runner`.
+  - If you see `Port 45733 is in use`, a previous runner may still be running. Stop it with `fuser -k 45733/tcp` (or your configured port), or set `CGFLOW_RUNNER_REUSE=1` to attach to the existing runner instead of starting a new one.
+  - `bun run dev:web` starts the runner as a sibling process; Ctrl+C should stop both the Vite UI and the runner together.
+  - When using a relative `VITE_RUNNER_URL` like `/runner-api`, the Vite dev server proxies requests to the local runner port configured by `CGFLOW_RUNNER_PORT`.
+  - Check the runner status bar in the UI and confirm the service is reachable at `VITE_RUNNER_URL`.
+  - In Electron desktop mode, ensure the app is running so Electron can start the embedded runner.
 - **Python process fails immediately**
   - Verify `CGFLOW_CONDA_ENV` and that `opt_boltz.py` is available under `../cgflow/scripts/opt/`.
 - **No molecules in dashboard yet**

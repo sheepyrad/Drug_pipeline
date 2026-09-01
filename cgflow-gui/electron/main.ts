@@ -6,7 +6,7 @@ import { spawn, ChildProcess, type SpawnOptions } from 'child_process';
 import YAML from 'yaml';
 import initSqlJs, { Database as SqlJsDatabase } from 'sql.js';
 import { ConvexHttpClient } from 'convex/browser';
-import { startRunnerServer } from './runner';
+import { startRunnerServer, parseRunnerOptionsFromEnv } from './runner';
 import { api } from '../convex/_generated/api';
 import type {
   OptConfig,
@@ -235,15 +235,11 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   await initSQL();
-  const parsedRunnerPort = Number.parseInt(
-    process.env.CGFLOW_RUNNER_PORT ?? process.env.VITE_RUNNER_PORT ?? '',
-    10
+  await startRunnerServer(
+    parseRunnerOptionsFromEnv({
+      dataDir: path.join(app.getPath('userData'), 'runner'),
+    })
   );
-  await startRunnerServer({
-    dataDir: path.join(app.getPath('userData'), 'runner'),
-    convexUrl: process.env.VITE_CONVEX_URL ?? process.env.CONVEX_URL,
-    port: Number.isFinite(parsedRunnerPort) ? parsedRunnerPort : undefined,
-  });
   createWindow();
 
   // Create tray icon

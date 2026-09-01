@@ -127,10 +127,13 @@ The app supports two deployment modes:
 
 | Mode | Command | Electron | Runner Server | Convex |
 |------|---------|----------|---------------|--------|
-| **Electron** | `npm run dev` | Yes — full desktop app | Started automatically by Electron main process | Optional |
-| **Web** | `npm run dev:web` | No — browser-only | Must be started separately (or already running) | Optional |
+| **Electron** | `npm run dev` / `bun run electron:dev` | Yes — full desktop app | Started automatically by Electron main process | Optional |
+| **Web (full)** | `bun run dev:web` | No — browser-only | Started automatically alongside Vite | Optional |
+| **Web (UI only)** | `bun run dev:web:ui` | No — browser-only | Must be started separately with `bun run dev:runner` | Optional |
 
-In both modes the React frontend communicates with the **Runner Server** over HTTP (`http://127.0.0.1:45731`). When Electron is present, IPC is available as a fallback. When Convex is configured (`VITE_CONVEX_URL`), data is also synced to the cloud.
+In both Electron and web modes the React frontend communicates with the **Runner Server** over HTTP (`http://127.0.0.1:45731`). When Electron is present, IPC is available as a fallback. When Convex is configured (`VITE_CONVEX_URL`), data is also synced to the cloud.
+
+In web mode, run-critical file/directory pickers are disabled. Users type runner-local paths for inputs and output directories, or use Convex uploads where supported. A runner status bar shows whether the local runner is ready, unavailable, or errored.
 
 ---
 

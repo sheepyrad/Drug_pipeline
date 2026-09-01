@@ -234,7 +234,13 @@ export class ConvexSyncService {
   /**
    * Start periodic sync for a run
    */
-  startSync(runId: string, convexRunId: string, resultDir: string, intervalMs = 30000) {
+  startSync(
+    runId: string,
+    convexRunId: string,
+    resultDir: string,
+    engine: 'boltz' | 'flashbind' = 'boltz',
+    intervalMs = 30000
+  ) {
     if (!this.client) {
       console.warn('Convex not configured, sync disabled');
       return;
@@ -244,11 +250,11 @@ export class ConvexSyncService {
     this.stopSync(runId);
 
     // Initial sync
-    this.syncRun(runId, convexRunId, resultDir);
+    this.syncRun(runId, convexRunId, resultDir, engine);
 
     // Set up periodic sync
     const interval = setInterval(() => {
-      this.syncRun(runId, convexRunId, resultDir);
+      this.syncRun(runId, convexRunId, resultDir, engine);
     }, intervalMs);
     this.syncIntervals.set(runId, interval);
   }
@@ -267,12 +273,17 @@ export class ConvexSyncService {
   /**
    * Sync a single run's data to Convex
    */
-  async syncRun(runId: string, convexRunId: string, resultDir: string) {
+  async syncRun(
+    runId: string,
+    convexRunId: string,
+    resultDir: string,
+    engine: 'boltz' | 'flashbind' = 'boltz'
+  ) {
     if (!this.client) return;
 
     try {
       // Sync molecules from reward cache
-      await this.syncMolecules(convexRunId, resultDir);
+      await this.syncMolecules(convexRunId, resultDir, engine);
 
       // Sync run status
       await this.syncRunStatus(convexRunId, resultDir);
@@ -339,7 +350,12 @@ export class ConvexSyncService {
   /**
    * Sync molecules from local SQLite to Convex
    */
-  private async syncMolecules(convexRunId: string, resultDir: string, limit = 1000) {
+  private async syncMolecules(
+    convexRunId: string,
+    resultDir: string,
+    engine: 'boltz' | 'flashbind',
+    limit = 1000
+  ) {
     if (!this.client) return;
 
     const rewardCachePath = path.join(resultDir, 'boltz_reward_cache.db');
@@ -347,8 +363,12 @@ export class ConvexSyncService {
 
     let molecules: Array<{
       runId: any;
+      engine: 'boltz' | 'flashbind';
       smiles: string;
       reward: number;
+      normalizedAffinity: number | null;
+      normalizedProbability: number | null;
+      normalizedScore: number | null;
       trajectory: string;
       affinityEnsemble: number | null;
       probabilityEnsemble: number | null;
@@ -412,8 +432,12 @@ export class ConvexSyncService {
           const idx = indexMap.get(entry.smiles);
           return {
             runId: convexRunId as any,
+            engine,
             smiles: entry.smiles,
             reward: entry.reward,
+            normalizedAffinity: null,
+            normalizedProbability: null,
+            normalizedScore: null,
             trajectory: trajMap.get(entry.smiles) || '[]',
             affinityEnsemble: boltz?.affinity_ensemble ?? null,
             probabilityEnsemble: boltz?.probability_ensemble ?? null,
@@ -434,8 +458,12 @@ export class ConvexSyncService {
       const artifactRows = await loadArtifactMolecules(resultDir, limit);
       molecules = artifactRows.map((row) => ({
         runId: convexRunId as any,
+        engine,
         smiles: row.smiles,
         reward: row.reward,
+        normalizedAffinity: null,
+        normalizedProbability: null,
+        normalizedScore: null,
         trajectory: '[]',
         affinityEnsemble: row.affinityEnsemble,
         probabilityEnsemble: row.probabilityEnsemble,
@@ -453,7 +481,7 @@ export class ConvexSyncService {
     if (molecules.length === 0) return;
 
     // Batch upsert to Convex
-    await this.client.mutation(api.molecules.batchUpsert, { molecules: molecules as any });
+    await this.client.mutation(api.molecules.batchUpsert, { molecules });
   }
 
   /**

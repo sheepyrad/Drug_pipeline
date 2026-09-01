@@ -1,7 +1,50 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { IpcChannels, IpcEvents, RunInfo } from '@shared/types';
 import { webFallback, isElectron } from '@/lib/webFallback';
+import { normalizeRunnerPathInput } from '@/lib/webMode';
 import { runnerClient } from '@/lib/runnerClient';
+
+function isBrowserOnlyPath(value: string): boolean {
+  return value.startsWith('web://') || value.startsWith('convex://');
+}
+
+async function invokeFileChannel<K extends keyof IpcChannels>(
+  channel: K,
+  ...args: Parameters<IpcChannels[K]>
+): Promise<Awaited<ReturnType<IpcChannels[K]>>> {
+  const rawPath = typeof args[0] === 'string' ? args[0] : null;
+  const filePath = rawPath ? normalizeRunnerPathInput(rawPath) : null;
+
+  if (filePath && !isBrowserOnlyPath(filePath)) {
+    const available = await runnerClient.isAvailable();
+    if (available) {
+      switch (channel) {
+        case 'file:read-pdb':
+        case 'file:read-text':
+          return (await runnerClient.readTextFile(filePath)) as Awaited<ReturnType<IpcChannels[K]>>;
+        case 'file:normalize-pdb-residues':
+          return (await runnerClient.normalizePdbResidues(filePath)) as Awaited<
+            ReturnType<IpcChannels[K]>
+          >;
+        default:
+          break;
+      }
+    }
+  }
+
+  if (isElectron()) {
+    const trimmedArgs =
+      filePath && typeof args[0] === 'string'
+        ? ([filePath, ...args.slice(1)] as Parameters<IpcChannels[K]>)
+        : args;
+    return await window.electronAPI.invoke(channel, ...trimmedArgs);
+  }
+  const trimmedArgs =
+    filePath && typeof args[0] === 'string'
+      ? ([filePath, ...args.slice(1)] as Parameters<IpcChannels[K]>)
+      : args;
+  return await webFallback[channel](...trimmedArgs);
+}
 
 // Typed IPC invoke hook - uses Electron API if available, falls back to web implementation
 export function useIpcInvoke() {
@@ -88,6 +131,14 @@ export function useIpcInvoke() {
         channel === 'run:get-boltz-metrics'
       ) {
         throw new Error('Runner server is not available for this operation.');
+      }
+
+      if (
+        channel === 'file:read-pdb' ||
+        channel === 'file:read-text' ||
+        channel === 'file:normalize-pdb-residues'
+      ) {
+        return await invokeFileChannel(channel, ...args);
       }
 
       if (isElectron()) {

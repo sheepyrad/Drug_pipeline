@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import ConfigBuilder from '@/pages/ConfigBuilder';
 import Dashboard from '@/pages/Dashboard';
+import RunnerStatusBar from '@/components/RunnerStatusBar';
 import type { RunInfo, OptConfig } from '@shared/types';
 import {
   Activity,
@@ -216,7 +217,9 @@ export default function App() {
         </aside>
 
         {/* Main Content */}
-        <main className="flex-1 overflow-hidden">
+        <main className="flex flex-1 flex-col overflow-hidden">
+          <RunnerStatusBar />
+          <div className="flex-1 overflow-hidden">
           <TabsContent value="config" className="m-0 h-full">
             <ConfigBuilder
               onConfigChange={setCurrentConfig}
@@ -231,6 +234,7 @@ export default function App() {
               onRunStatusChange={setActiveRun}
             />
           </TabsContent>
+          </div>
         </main>
       </Tabs>
     </div>

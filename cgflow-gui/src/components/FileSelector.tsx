@@ -23,6 +23,7 @@ import {
   Trash2,
   Clock,
 } from 'lucide-react';
+import { normalizeRunnerPathInput } from '@/lib/webMode';
 
 interface FileSelectorProps {
   label: string;
@@ -38,6 +39,9 @@ interface FileSelectorProps {
   onSelectLocal: () => Promise<string | null>;
   onReadLocalContent?: (path: string) => Promise<string>;
   prepareFileForUpload?: (file: File) => Promise<{ file: File; content: string }>;
+  disableLocalPicker?: boolean;
+  pathInputMode?: boolean;
+  pathInputPlaceholder?: string;
 }
 
 export default function FileSelector({
@@ -53,6 +57,9 @@ export default function FileSelector({
   onSelectLocal,
   onReadLocalContent,
   prepareFileForUpload,
+  disableLocalPicker = false,
+  pathInputMode = false,
+  pathInputPlaceholder,
 }: FileSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -177,10 +184,42 @@ export default function FileSelector({
   const displayValue = value
     ? value.startsWith('convex://')
       ? value.split('::')[1] || 'Uploaded file'
-      : value.split('/').pop() || value
+      : pathInputMode
+        ? value
+        : value.split('/').pop() || value
     : '';
 
+  const inputValue = pathInputMode ? value : displayValue;
+  const inputPlaceholder = pathInputPlaceholder ?? placeholder;
+
   const isConvexFile = value.startsWith('convex://');
+
+  useEffect(() => {
+    if (!pathInputMode || !value || !onReadLocalContent || !onContentLoaded) return;
+    if (value.startsWith('convex://') || value.startsWith('web://')) return;
+
+    const trimmedPath = normalizeRunnerPathInput(value);
+    if (!trimmedPath) return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const content = await onReadLocalContent(trimmedPath);
+          if (!cancelled && content) {
+            onContentLoaded(content);
+          }
+        } catch {
+          // Path may be incomplete or unavailable until the runner can read it.
+        }
+      })();
+    }, 400);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [pathInputMode, value, onReadLocalContent, onContentLoaded]);
 
   return (
     <div className="space-y-1">
@@ -193,9 +232,16 @@ export default function FileSelector({
         <div className="flex gap-2">
           <div className="relative flex-1">
             <Input
-              value={displayValue}
+              value={inputValue}
               onChange={(e) => onChange(e.target.value)}
-              placeholder={placeholder}
+              onBlur={() => {
+                if (!pathInputMode) return;
+                const trimmed = normalizeRunnerPathInput(value);
+                if (trimmed !== value) {
+                  onChange(trimmed);
+                }
+              }}
+              placeholder={inputPlaceholder}
               className="h-8 pr-8"
             />
             {isConvexFile && (
@@ -219,15 +265,17 @@ export default function FileSelector({
             )}
           </Button>
 
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={handleSelectLocal}
-            className="h-8 w-8 shrink-0"
-            title="Select from local filesystem"
-          >
-            <FileUp className="h-4 w-4" />
-          </Button>
+          {!disableLocalPicker ? (
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={handleSelectLocal}
+              className="h-8 w-8 shrink-0"
+              title="Select from local filesystem"
+            >
+              <FileUp className="h-4 w-4" />
+            </Button>
+          ) : null}
         </div>
 
         {isOpen && createPortal(
@@ -329,7 +377,13 @@ export default function FileSelector({
         )}
       </div>
 
-      {value && (
+      {pathInputMode ? (
+        <p className="text-[11px] text-muted-foreground">
+          Type a path accessible to the local runner on this machine.
+        </p>
+      ) : null}
+
+      {!pathInputMode && value ? (
         <div className="flex items-center gap-2">
           <Badge 
             variant="secondary" 
@@ -348,7 +402,7 @@ export default function FileSelector({
             )}
           </Badge>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

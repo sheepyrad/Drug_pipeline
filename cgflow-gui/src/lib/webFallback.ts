@@ -72,9 +72,9 @@ export const webFallback: {
   },
 
   'file:select-directory': async () => {
-    // Directory selection not supported in web mode
-    alert('Directory selection is not available in web mode. Please use the Electron app.');
-    return null;
+    throw new Error(
+      'Directory selection is not available in web mode. Type a runner-local directory path instead.'
+    );
   },
 
   'file:read-pdb': async (path: string) => {
@@ -146,10 +146,11 @@ export const webFallback: {
     return fileStore.has(path);
   },
 
-  // Run management (mock implementations for web)
+  // Run management (fallback when runner HTTP service is unavailable)
   'run:start': async (_payload: { config: OptConfig; configPath?: string | null; name?: string | null }) => {
-    alert('Training runs can only be started in the Electron app.');
-    throw new Error('Not available in web mode');
+    throw new Error(
+      'Local runner is unavailable. Start it with "bun run dev:web" or run "bun run dev:runner" in a separate terminal.'
+    );
   },
 
   'run:stop': async (_runId: string) => {

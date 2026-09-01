@@ -6,12 +6,12 @@ const moleculeValidator = v.object({
   _id: v.id('molecules'),
   _creationTime: v.number(),
   runId: v.id('runs'),
-  engine: v.union(v.literal('boltz'), v.literal('flashbind')),
+  engine: v.optional(v.union(v.literal('boltz'), v.literal('flashbind'))),
   smiles: v.string(),
   reward: v.number(),
-  normalizedAffinity: v.union(v.number(), v.null()),
-  normalizedProbability: v.union(v.number(), v.null()),
-  normalizedScore: v.union(v.number(), v.null()),
+  normalizedAffinity: v.optional(v.union(v.number(), v.null())),
+  normalizedProbability: v.optional(v.union(v.number(), v.null())),
+  normalizedScore: v.optional(v.union(v.number(), v.null())),
   trajectory: v.string(),
   affinityEnsemble: v.union(v.number(), v.null()),
   probabilityEnsemble: v.union(v.number(), v.null()),
@@ -208,6 +208,53 @@ export const get = query({
   returns: v.union(moleculeValidator, v.null()),
   handler: async (ctx, args) => {
     return await ctx.db.get(args.id);
+  },
+});
+
+export const backfillMissingEngine = mutation({
+  args: {},
+  returns: v.number(),
+  handler: async (ctx) => {
+    const molecules = await ctx.db.query('molecules').collect();
+    let patched = 0;
+
+    for (const mol of molecules) {
+      const needsEngine = mol.engine === undefined;
+      const needsNormalized =
+        mol.normalizedAffinity === undefined ||
+        mol.normalizedProbability === undefined ||
+        mol.normalizedScore === undefined;
+
+      if (!needsEngine && !needsNormalized) {
+        continue;
+      }
+
+      const run = await ctx.db.get(mol.runId);
+      const patch: {
+        engine?: 'boltz' | 'flashbind';
+        normalizedAffinity?: number | null;
+        normalizedProbability?: number | null;
+        normalizedScore?: number | null;
+      } = {};
+
+      if (needsEngine) {
+        patch.engine = run?.engine ?? 'boltz';
+      }
+      if (mol.normalizedAffinity === undefined) {
+        patch.normalizedAffinity = null;
+      }
+      if (mol.normalizedProbability === undefined) {
+        patch.normalizedProbability = null;
+      }
+      if (mol.normalizedScore === undefined) {
+        patch.normalizedScore = null;
+      }
+
+      await ctx.db.patch(mol._id, patch);
+      patched += 1;
+    }
+
+    return patched;
   },
 });
 

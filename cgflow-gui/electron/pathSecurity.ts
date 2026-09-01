@@ -1,5 +1,6 @@
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 const DANGEROUS_CHAR_PATTERN = /[\0\x01-\x1f\x7f]/;
 const EXPLICIT_WORKSPACE_ENV_KEYS = [
@@ -20,6 +21,18 @@ function parseWorkspacePathsFromEnv(): string[] {
     }
   }
   return explicitPaths;
+}
+
+function getBuiltinWorkspaceDirs(): string[] {
+  try {
+    const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+    const cgflowGuiRoot = path.resolve(moduleDir, '..');
+    const repoRoot = path.resolve(cgflowGuiRoot, '..');
+    const cgflowRoot = path.resolve(repoRoot, 'cgflow');
+    return [cgflowGuiRoot, repoRoot, cgflowRoot];
+  } catch {
+    return [];
+  }
 }
 
 function normalizeBaseDir(baseDir: string): string {
@@ -56,22 +69,31 @@ export function isPathContained(targetPath: string, allowedBaseDirs: string[]): 
   });
 }
 
-const homeDir = os.homedir();
-const runnerDir = path.join(homeDir, '.cgflow-runner');
-const configuredWorkspaceDirs = parseWorkspacePathsFromEnv().map(normalizeBaseDir);
+function getAllowedBaseDirs(): string[] {
+  const homeDir = os.homedir();
+  const runnerDir = path.join(homeDir, '.cgflow-runner');
+  const configuredWorkspaceDirs = [
+    ...getBuiltinWorkspaceDirs(),
+    ...parseWorkspacePathsFromEnv(),
+  ].map(normalizeBaseDir);
 
-export const DEFAULT_ALLOWED_BASE_DIRS = Array.from(
-  new Set([homeDir, runnerDir, ...configuredWorkspaceDirs].map(normalizeBaseDir))
-);
+  return Array.from(new Set([homeDir, runnerDir, ...configuredWorkspaceDirs].map(normalizeBaseDir)));
+}
 
-export const DEFAULT_WRITE_ALLOWED_BASE_DIRS = Array.from(
-  new Set([runnerDir, ...configuredWorkspaceDirs].map(normalizeBaseDir))
-);
+function getWriteAllowedBaseDirs(): string[] {
+  const homeDir = os.homedir();
+  const runnerDir = path.join(homeDir, '.cgflow-runner');
+  const configuredWorkspaceDirs = [
+    ...getBuiltinWorkspaceDirs(),
+    ...parseWorkspacePathsFromEnv(),
+  ].map(normalizeBaseDir);
+
+  return Array.from(new Set([runnerDir, ...configuredWorkspaceDirs].map(normalizeBaseDir)));
+}
 
 export function validateFilePath(filePath: string, operation: 'read' | 'write'): void {
   const sanitizedPath = sanitizePath(filePath);
-  const allowedDirs =
-    operation === 'write' ? DEFAULT_WRITE_ALLOWED_BASE_DIRS : DEFAULT_ALLOWED_BASE_DIRS;
+  const allowedDirs = operation === 'write' ? getWriteAllowedBaseDirs() : getAllowedBaseDirs();
 
   if (!isPathContained(sanitizedPath, allowedDirs)) {
     throw new Error(
