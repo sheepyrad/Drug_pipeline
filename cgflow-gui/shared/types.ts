@@ -25,6 +25,14 @@ export const safePathSchema = z
     message: 'Invalid or unsafe path',
   });
 
+/** Path field that may be blank in the UI and filled in by the runner at start time. */
+const emptyOrSafePathSchema = z
+  .string()
+  .max(4096)
+  .refine((value) => value === '' || isSafePathString(value), {
+    message: 'Invalid or unsafe path',
+  });
+
 const nullableSafePathSchema = safePathSchema.nullable();
 
 export const positiveInt = z.number().int().min(1).max(100_000);
@@ -45,7 +53,7 @@ const targetResidueSchema = z.string().regex(/^[A-Z]:\d+$/, {
 export const OptimizationEngineSchema = z.enum(['boltz', 'flashbind']);
 
 export const BoltzConfigSchema = z.object({
-  base_yaml: safePathSchema,
+  base_yaml: emptyOrSafePathSchema.default(''),
   target_residues: z.array(targetResidueSchema),
   msa_path: nullableSafePathSchema,
   cache_dir: nullableSafePathSchema,
@@ -101,9 +109,10 @@ const BaseOptConfigSchema = z.object({
 });
 
 const BoltzOptConfigSchema = BaseOptConfigSchema.extend({
-  engine: z.literal('boltz').optional().default('boltz'),
+  engine: z.literal('boltz'),
   boltz: BoltzConfigSchema,
-  flashbind: FlashBindConfigSchema.optional(),
+  // Retained in the UI when switching engines; not validated for Boltz runs.
+  flashbind: z.unknown().optional(),
 });
 
 const FlashBindOptConfigSchema = BaseOptConfigSchema.extend({
@@ -112,10 +121,23 @@ const FlashBindOptConfigSchema = BaseOptConfigSchema.extend({
   flashbind: FlashBindConfigSchema,
 });
 
-export const OptConfigSchema = z.discriminatedUnion('engine', [
-  BoltzOptConfigSchema,
-  FlashBindOptConfigSchema,
-]);
+function normalizeOptConfigEngine(input: unknown): unknown {
+  if (!input || typeof input !== 'object') {
+    return input;
+  }
+
+  const raw = input as Record<string, unknown>;
+  if (raw.engine === 'flashbind') {
+    return raw;
+  }
+
+  return { ...raw, engine: 'boltz' };
+}
+
+export const OptConfigSchema = z.preprocess(
+  normalizeOptConfigEngine,
+  z.discriminatedUnion('engine', [BoltzOptConfigSchema, FlashBindOptConfigSchema])
+);
 
 export type OptimizationEngine = z.infer<typeof OptimizationEngineSchema>;
 export type BoltzConfig = z.infer<typeof BoltzConfigSchema>;
@@ -268,6 +290,17 @@ export const RunnerResumePayloadSchema = z.object({
 export const RunnerImportPayloadSchema = z.object({
   resultDir: safePathSchema,
   name: configNameSchema.nullable().optional(),
+});
+
+export const RunnerFilePathPayloadSchema = z.object({
+  path: safePathSchema,
+});
+
+export const NormalizedPdbFileSchema = z.object({
+  path: safePathSchema,
+  content: z.string(),
+  converted: z.boolean(),
+  message: z.string().nullable(),
 });
 
 // ============================================================================

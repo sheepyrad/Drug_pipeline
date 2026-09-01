@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:web": "vite --config vite.config.web.ts",
+    "dev:web:ui": "vite --config vite.config.web.ts",
+    "dev:runner": "bun electron/runner.ts",
+    "dev:web": "concurrently --kill-others -n ui,runner -c blue,green \"vite --config vite.config.web.ts\" \"bun electron/runner.ts\"",
     "build": "tsc && vite build && electron-builder",
     "preview": "vite preview",
     "electron:dev": "concurrently \"vite --strictPort\" \"wait-on http://localhost:5173 && wait-on dist-electron/main.js && wait-on dist-electron/preload.js && VITE_DEV_SERVER_URL=http://localhost:5173 GSETTINGS_BACKEND=memory electron .\"",

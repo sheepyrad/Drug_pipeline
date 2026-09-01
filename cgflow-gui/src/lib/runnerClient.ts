@@ -1,15 +1,36 @@
 import { z } from 'zod';
 import {
   MoleculeResultSchema,
+  NormalizedPdbFileSchema,
   RunInfoSchema,
   type BoltzMetricSeries,
   type MoleculeResult,
+  type NormalizedPdbFile,
   type OptConfig,
   type RunInfo,
 } from '@shared/types';
 
 const DEFAULT_RUNNER_URL =
   import.meta.env.VITE_RUNNER_URL || 'http://127.0.0.1:45731';
+
+export type RunnerHealth = {
+  ok: boolean;
+  reachable: boolean;
+  status?: string;
+  version?: string;
+  runs?: number;
+  error?: string;
+};
+
+export function getRunnerUrl(): string {
+  return DEFAULT_RUNNER_URL;
+}
+
+const HealthResponseSchema = z.object({
+  status: z.string(),
+  version: z.string().optional(),
+  runs: z.number().optional(),
+});
 
 type RunnerStartPayload = {
   config: OptConfig;
@@ -46,6 +67,7 @@ const RunnerEventSchemaMap = {
 } as const;
 
 const OutputResponseSchema = z.object({ lines: z.array(z.string()) });
+const ReadTextResponseSchema = z.object({ content: z.string() });
 const BoltzMetricSeriesSchema = z.object({
   pointCount: z.number(),
   bestProb: z.array(z.number()),
@@ -76,18 +98,54 @@ class RunnerClient {
   }
 
   async isAvailable(force = false): Promise<boolean> {
+    const health = await this.checkHealth(force);
+    return health.ok;
+  }
+
+  async checkHealth(force = false): Promise<RunnerHealth> {
     const now = Date.now();
     if (!force && now - this.lastHealthCheck < 5000) {
-      return this.lastHealthOk;
+      if (this.lastHealthOk) {
+        return { ok: true, reachable: true };
+      }
+      return {
+        ok: false,
+        reachable: false,
+        error: 'Runner is unavailable.',
+      };
     }
+
     this.lastHealthCheck = now;
     try {
       const res = await fetch(`${this.baseUrl}/health`, { method: 'GET' });
-      this.lastHealthOk = res.ok;
-    } catch {
+      if (!res.ok) {
+        this.lastHealthOk = false;
+        return {
+          ok: false,
+          reachable: true,
+          error: `Runner health check failed with status ${res.status}.`,
+        };
+      }
+
+      const data = await parseJsonResponse(res, HealthResponseSchema, 'health');
+      const ok = data.status === 'ok';
+      this.lastHealthOk = ok;
+      return {
+        ok,
+        reachable: true,
+        status: data.status,
+        version: data.version,
+        runs: data.runs,
+        error: ok ? undefined : `Runner reported status "${data.status}".`,
+      };
+    } catch (error) {
       this.lastHealthOk = false;
+      return {
+        ok: false,
+        reachable: false,
+        error: error instanceof Error ? error.message : 'Failed to reach runner.',
+      };
     }
-    return this.lastHealthOk;
   }
 
   async listRuns(): Promise<RunInfo[]> {
@@ -204,6 +262,33 @@ class RunnerClient {
     if (res.status === 404) return null;
     if (!res.ok) throw new Error('Failed to get boltz metrics');
     return await parseJsonResponse(res, BoltzMetricSeriesSchema, 'boltz metrics');
+  }
+
+  async readTextFile(filePath: string): Promise<string> {
+    const res = await fetch(`${this.baseUrl}/files/read-text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: filePath }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || 'Failed to read file');
+    }
+    const data = await parseJsonResponse(res, ReadTextResponseSchema, 'read text file');
+    return data.content;
+  }
+
+  async normalizePdbResidues(filePath: string): Promise<NormalizedPdbFile> {
+    const res = await fetch(`${this.baseUrl}/files/normalize-pdb-residues`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: filePath }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || 'Failed to normalize PDB residues');
+    }
+    return await parseJsonResponse(res, NormalizedPdbFileSchema, 'normalize pdb residues');
   }
 
   on<K extends RunnerEventName>(event: K, handler: (data: RunnerEventMap[K]) => void): () => void {

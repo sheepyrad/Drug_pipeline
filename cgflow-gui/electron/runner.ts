@@ -10,6 +10,7 @@ import { ConvexHttpClient } from 'convex/browser';
 import type {
   BoltzMetricInputRow,
   BoltzMetricSeries,
+  NormalizedPdbFile,
   OptConfig,
   RunInfo,
   MoleculeResult,
@@ -20,10 +21,12 @@ import type {
 } from '../shared/types';
 import {
   OptConfigSchema,
+  RunnerFilePathPayloadSchema,
   RunnerImportPayloadSchema,
   RunnerResumePayloadSchema,
   RunnerStartPayloadSchema,
 } from '../shared/types';
+import { normalizePdbResiduesToOneIndexed } from '../shared/pdbResidues';
 import { computeBoltzMetrics } from '../shared/boltzMetrics';
 import { getConvexSyncService } from './convex-sync';
 import { api } from '../convex/_generated/api';
@@ -92,6 +95,187 @@ interface RunnerOptions {
   dataDir?: string;
   convexUrl?: string;
   port?: number;
+}
+
+function parseRunnerPortFromEnv(): number | undefined {
+  const fromPort = process.env.CGFLOW_RUNNER_PORT ?? process.env.VITE_RUNNER_PORT;
+  if (fromPort) {
+    const parsed = Number.parseInt(fromPort, 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+
+  const runnerUrl = process.env.VITE_RUNNER_URL?.trim();
+  if (runnerUrl) {
+    try {
+      const url = new URL(runnerUrl);
+      if (url.port) {
+        const parsed = Number.parseInt(url.port, 10);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      return url.protocol === 'https:' ? 443 : 80;
+    } catch {
+      // Ignore invalid URL values and fall back to default port.
+    }
+  }
+
+  return undefined;
+}
+
+export function parseRunnerOptionsFromEnv(overrides: RunnerOptions = {}): RunnerOptions {
+  const port = overrides.port ?? parseRunnerPortFromEnv();
+  const convexUrl =
+    overrides.convexUrl ?? process.env.VITE_CONVEX_URL ?? process.env.CONVEX_URL;
+
+  return {
+    ...overrides,
+    ...(port !== undefined ? { port } : {}),
+    ...(convexUrl ? { convexUrl } : {}),
+  };
+}
+
+async function loadEnvFile(envPath: string, overwrite: boolean): Promise<void> {
+  try {
+    const content = await fs.readFile(envPath, 'utf-8');
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq === -1) continue;
+      const key = trimmed.slice(0, eq).trim();
+      let value = trimmed.slice(eq + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      if (!key) continue;
+      if (overwrite || process.env[key] === undefined) {
+        process.env[key] = value;
+      }
+    }
+  } catch {
+    // Env file is optional.
+  }
+}
+
+async function loadDotEnvIfPresent(): Promise<void> {
+  const root = path.resolve(__dirname, '..');
+  await loadEnvFile(path.join(root, '.env'), false);
+  await loadEnvFile(path.join(root, '.env.local'), true);
+}
+
+async function probeRunnerHealth(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, { method: 'GET' });
+    if (!res.ok) return false;
+    const data = (await res.json()) as { status?: string };
+    return data.status === 'ok';
+  } catch {
+    return false;
+  }
+}
+
+function shouldReuseExistingRunner(): boolean {
+  const raw = process.env.CGFLOW_RUNNER_REUSE?.trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes';
+}
+
+function registerRunnerShutdown(args: {
+  server: http.Server;
+  processes: Map<string, ChildProcess>;
+  sseClients: Set<http.ServerResponse>;
+  stopResultDirRefresh: (runId: string) => void;
+}): void {
+  let shuttingDown = false;
+
+  const shutdown = async (signal: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\nCGFlow runner shutting down (${signal})...`);
+
+    for (const [runId, proc] of args.processes) {
+      args.stopResultDirRefresh(runId);
+      if (!proc.killed) {
+        proc.kill('SIGINT');
+      }
+    }
+
+    for (const client of args.sseClients) {
+      client.end();
+    }
+    args.sseClients.clear();
+
+    await new Promise<void>((resolve) => {
+      args.server.close(() => resolve());
+    });
+
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => {
+    void shutdown('SIGINT');
+  });
+  process.on('SIGTERM', () => {
+    void shutdown('SIGTERM');
+  });
+}
+
+async function listenRunnerServer(
+  server: http.Server,
+  port: number
+): Promise<{ owned: boolean }> {
+  if (await probeRunnerHealth(port)) {
+    if (shouldReuseExistingRunner()) {
+      console.log(
+        `CGFlow runner already running at http://127.0.0.1:${port} (reusing existing process)`
+      );
+      return { owned: false };
+    }
+    throw new Error(
+      `Port ${port} is already in use by an existing CGFlow runner. Stop it first (for example: fuser -k ${port}/tcp) or set CGFLOW_RUNNER_REUSE=1 to reuse it.`
+    );
+  }
+
+  let owned = true;
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        void probeRunnerHealth(port).then((healthy) => {
+          if (healthy && shouldReuseExistingRunner()) {
+            console.log(
+              `CGFlow runner already running at http://127.0.0.1:${port} (reusing existing process)`
+            );
+            owned = false;
+            resolve();
+            return;
+          }
+          if (healthy) {
+            reject(
+              new Error(
+                `Port ${port} is already in use by an existing CGFlow runner. Stop it first (for example: fuser -k ${port}/tcp) or set CGFLOW_RUNNER_REUSE=1 to reuse it.`
+              )
+            );
+            return;
+          }
+          reject(
+            new Error(
+              `Port ${port} is already in use by another process. Stop it or set CGFLOW_RUNNER_PORT to a free port.`
+            )
+          );
+        });
+        return;
+      }
+      reject(err);
+    });
+
+    server.listen(port, '127.0.0.1', () => {
+      console.log(`CGFlow runner listening on http://127.0.0.1:${port}`);
+      resolve();
+    });
+  });
+
+  return { owned };
 }
 
 interface RunRecord extends RunInfo {
@@ -1133,7 +1317,7 @@ export async function startRunnerServer(options: RunnerOptions = {}) {
     broadcast('run:status-changed', run);
     if (run.convexRunId) {
       convexSync.stopSync(runId);
-      convexSync.startSync(runId, run.convexRunId, nextResultDir, 30000);
+      convexSync.startSync(runId, run.convexRunId, nextResultDir, run.engine ?? 'boltz', 30000);
     }
     return true;
   }
@@ -1405,7 +1589,7 @@ export async function startRunnerServer(options: RunnerOptions = {}) {
 
     // Start Convex sync if configured
     if (runInfo.convexRunId) {
-      convexSync.startSync(runId, runInfo.convexRunId, runInfo.resultDir, 30000);
+      convexSync.startSync(runId, runInfo.convexRunId, runInfo.resultDir, runInfo.engine ?? 'boltz', 30000);
     }
 
     broadcast('run:status-changed', runInfo);
@@ -1545,7 +1729,7 @@ export async function startRunnerServer(options: RunnerOptions = {}) {
 
     if (run.convexRunId) {
       await convexSync.updateRunStatus(run.convexRunId, 'running', run.currentStep);
-      convexSync.startSync(runId, run.convexRunId, run.resultDir, 30000);
+      convexSync.startSync(runId, run.convexRunId, run.resultDir, run.engine ?? 'boltz', 30000);
     }
 
     broadcast('run:status-changed', run);
@@ -1606,7 +1790,7 @@ export async function startRunnerServer(options: RunnerOptions = {}) {
 
         if (convexRunId) {
           run.convexRunId = convexRunId;
-          await convexSync.syncRun(run.id, convexRunId, run.resultDir);
+          await convexSync.syncRun(run.id, convexRunId, run.resultDir, run.engine ?? 'boltz');
           await convexSync.updateRunStatus(
             convexRunId,
             run.status,
@@ -1674,7 +1858,7 @@ export async function startRunnerServer(options: RunnerOptions = {}) {
       run.convexRunId = convexRunId;
     }
 
-    await convexSync.syncRun(run.id, run.convexRunId, run.resultDir);
+    await convexSync.syncRun(run.id, run.convexRunId, run.resultDir, run.engine ?? 'boltz');
     await convexSync.updateRunStatus(
       run.convexRunId,
       run.status,
@@ -1685,7 +1869,7 @@ export async function startRunnerServer(options: RunnerOptions = {}) {
 
     // Keep periodic sync active only for actively running runs.
     if (run.status === 'running') {
-      convexSync.startSync(run.id, run.convexRunId, run.resultDir, 30000);
+      convexSync.startSync(run.id, run.convexRunId, run.resultDir, run.engine ?? 'boltz', 30000);
     }
 
     run.lastUpdatedAt = new Date().toISOString();
@@ -1934,6 +2118,43 @@ export async function startRunnerServer(options: RunnerOptions = {}) {
     return null;
   }
 
+  function normalizedPdbPathFor(filePath: string): string {
+    const parsedPath = path.parse(filePath);
+    const extension = parsedPath.ext || '.pdb';
+    return path.join(parsedPath.dir, `${parsedPath.name}.1indexed${extension}`);
+  }
+
+  async function readTextFileAtPath(filePath: string): Promise<string> {
+    const trimmedPath = filePath.trim();
+    validateFilePath(trimmedPath, 'read');
+    return await fs.readFile(trimmedPath, 'utf-8');
+  }
+
+  async function normalizePdbResiduesAtPath(filePath: string): Promise<NormalizedPdbFile> {
+    const content = await readTextFileAtPath(filePath);
+    const normalized = normalizePdbResiduesToOneIndexed(content);
+
+    if (!normalized.converted) {
+      return {
+        path: filePath,
+        content,
+        converted: false,
+        message: null,
+      };
+    }
+
+    const normalizedPath = normalizedPdbPathFor(filePath);
+    await fs.mkdir(path.dirname(normalizedPath), { recursive: true });
+    await fs.writeFile(normalizedPath, normalized.content, 'utf-8');
+
+    return {
+      path: normalizedPath,
+      content: normalized.content,
+      converted: true,
+      message: normalized.message,
+    };
+  }
+
   // ========================================================================
   // HTTP server
   // ========================================================================
@@ -2007,6 +2228,56 @@ export async function startRunnerServer(options: RunnerOptions = {}) {
       if (options.max != null && parsed > options.max) return { value: null, valid: false };
       return { value: parsed, valid: true };
     };
+
+    if (req.method === 'POST' && url.pathname === '/files/read-text') {
+      let rawPayload: unknown;
+      try {
+        rawPayload = await readJsonBody();
+      } catch (err) {
+        sendJson(400, { error: err instanceof Error ? err.message : 'Invalid request body' });
+        return;
+      }
+      const parsedPayload = RunnerFilePathPayloadSchema.safeParse(rawPayload);
+      if (!parsedPayload.success) {
+        sendJson(400, {
+          error: 'Invalid file path payload',
+          details: parsedPayload.error.issues,
+        });
+        return;
+      }
+      try {
+        const content = await readTextFileAtPath(parsedPayload.data.path);
+        sendJson(200, { content });
+      } catch (err) {
+        sendText(404, err instanceof Error ? err.message : 'Failed to read file');
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/files/normalize-pdb-residues') {
+      let rawPayload: unknown;
+      try {
+        rawPayload = await readJsonBody();
+      } catch (err) {
+        sendJson(400, { error: err instanceof Error ? err.message : 'Invalid request body' });
+        return;
+      }
+      const parsedPayload = RunnerFilePathPayloadSchema.safeParse(rawPayload);
+      if (!parsedPayload.success) {
+        sendJson(400, {
+          error: 'Invalid file path payload',
+          details: parsedPayload.error.issues,
+        });
+        return;
+      }
+      try {
+        const normalized = await normalizePdbResiduesAtPath(parsedPayload.data.path);
+        sendJson(200, normalized);
+      } catch (err) {
+        sendText(404, err instanceof Error ? err.message : 'Failed to normalize PDB');
+      }
+      return;
+    }
 
     // Health
     if (req.method === 'GET' && url.pathname === '/health') {
@@ -2280,15 +2551,24 @@ export async function startRunnerServer(options: RunnerOptions = {}) {
     sendJson(404, { error: 'Not found' });
   });
 
-  server.listen(port, '127.0.0.1', () => {
-    console.log(`CGFlow runner listening on http://127.0.0.1:${port}`);
-  });
+  const { owned } = await listenRunnerServer(server, port);
+  if (owned) {
+    registerRunnerShutdown({
+      server,
+      processes: state.processes,
+      sseClients,
+      stopResultDirRefresh,
+    });
+  }
 }
 
 // CLI mode
 const entry = fileURLToPath(import.meta.url);
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(entry)) {
-  void startRunnerServer().catch((err) => {
+  void (async () => {
+    await loadDotEnvIfPresent();
+    await startRunnerServer(parseRunnerOptionsFromEnv());
+  })().catch((err) => {
     console.error('Failed to start runner:', err);
     process.exit(1);
   });

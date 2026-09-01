@@ -46,12 +46,13 @@ export default defineSchema({
   // Generated molecules (synced from SQLite)
   molecules: defineTable({
     runId: v.id('runs'),
-    engine: v.union(v.literal('boltz'), v.literal('flashbind')),
+    // Optional for legacy rows synced before engine was tracked; backfill via molecules.backfillMissingEngine.
+    engine: v.optional(v.union(v.literal('boltz'), v.literal('flashbind'))),
     smiles: v.string(),
     reward: v.number(),
-    normalizedAffinity: v.union(v.number(), v.null()),
-    normalizedProbability: v.union(v.number(), v.null()),
-    normalizedScore: v.union(v.number(), v.null()),
+    normalizedAffinity: v.optional(v.union(v.number(), v.null())),
+    normalizedProbability: v.optional(v.union(v.number(), v.null())),
+    normalizedScore: v.optional(v.union(v.number(), v.null())),
     trajectory: v.string(), // JSON string
     // Boltz scores
     affinityEnsemble: v.union(v.number(), v.null()),

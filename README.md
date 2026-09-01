@@ -15,12 +15,16 @@ mamba create -n cgflow python=3.11
 mamba activate cgflow
 
 # 2. Install PyTorch + PyG via pip
-pip install torch==2.9.1 \
+# Ubuntu 20.04 (glibc 2.31): use torch 2.6.0 + cu124 — PyG wheels for torch 2.9.x
+# require glibc 2.32+ and will fail to import torch_scatter.
+pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+
+pip install \
     torch-geometric>=2.4.0 \
     torch-scatter>=2.1.2 \
     torch-sparse>=0.6.18 \
     torch-cluster>=1.6.3 \
-    -f https://data.pyg.org/whl/torch-2.9.1+cu126.html
+    -f https://data.pyg.org/whl/torch-2.6.0+cu124.html
 
 # 3. Install cgflow (editable)
 pip install -e .
@@ -35,9 +39,12 @@ pip install -e '.[unidock]'
 mamba install notebook
 pip install -e '.[extra]'
 
-# 5. Boltz with CUDA (upgrade to latest compatible release)
-pip install 'boltz[cuda]' -U
+# 5. Boltz with CUDA — pin torch so pip does not upgrade it (boltz requires torch>=2.2)
+printf 'torch==2.6.0\n' > /tmp/cgflow-constraints.txt
+pip install 'boltz[cuda]' -c /tmp/cgflow-constraints.txt
 ```
+
+See `cgflow/README.md` for Ubuntu 22.04+ (newer torch/PyG) notes and why `-U` must be avoided when installing Boltz.
 
 Prepare data, environment files, and pretrained CGFlow pose weights per `cgflow/README.md` and `cgflow/experiments/README.md`.
 

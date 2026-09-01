@@ -6,6 +6,7 @@ import { Label } from '@/components/ui/label';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { useIpcInvoke, useIpcEvent, useRunOutput } from '@/hooks/useIpc';
+import { isWebMode, normalizeRunnerPathInput, validateRunnerReadablePaths } from '@/lib/webMode';
 import MolstarViewer from '@/components/MolstarViewer';
 import FileSelector from '@/components/FileSelector';
 import type { OptConfig, RunInfo, BoltzConfig, FlashBindConfig, OptimizationEngine } from '@shared/types';
@@ -251,9 +252,17 @@ export default function ConfigBuilder({
   const [startError, setStartError] = useState<string | null>(null);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [pdbResidueMessage, setPdbResidueMessage] = useState<string | null>(null);
+  const [pdbLoadError, setPdbLoadError] = useState<string | null>(null);
   const [leftPanelWidth, setLeftPanelWidth] = useState(50);
   const [isConfigPanelCollapsed, setIsConfigPanelCollapsed] = useState(false);
   const isFlashBindEngine = config.engine === 'flashbind';
+  const webMode = isWebMode();
+  const webPathInputProps = webMode
+    ? {
+        disableLocalPicker: true,
+        pathInputMode: true as const,
+      }
+    : {};
 
   useEffect(() => {
     onConfigChange(config);
@@ -307,36 +316,54 @@ export default function ConfigBuilder({
   useEffect(() => {
     let cancelled = false;
 
-    const maybeLoadPdbContent = async () => {
-      if (!config.protein_path) {
-        if (!cancelled) {
-          setPdbContent(null);
-          setLoadedPdbPath(null);
-          setPdbResidueMessage(null);
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const proteinPath = normalizeRunnerPathInput(config.protein_path);
+        if (!proteinPath) {
+          if (!cancelled) {
+            setPdbContent(null);
+            setLoadedPdbPath(null);
+            setPdbResidueMessage(null);
+            setPdbLoadError(null);
+          }
+          return;
         }
-        return;
-      }
-      if (pdbContent && loadedPdbPath === config.protein_path) return;
-      try {
-        const normalized = await invoke('file:normalize-pdb-residues', config.protein_path);
-        if (!cancelled) {
-          if (normalized.path !== config.protein_path) {
+        if (proteinPath !== config.protein_path) {
+          setConfig((prev) => ({ ...prev, protein_path: proteinPath }));
+          return;
+        }
+        if (loadedPdbPath === proteinPath && pdbContent) return;
+
+        try {
+          const normalized = await invoke('file:normalize-pdb-residues', proteinPath);
+          if (cancelled) return;
+          if (normalized.path !== proteinPath) {
             setConfig((prev) => ({ ...prev, protein_path: normalized.path }));
           }
           setPdbContent(normalized.content);
           setLoadedPdbPath(normalized.path);
           setPdbResidueMessage(normalized.message);
+          setPdbLoadError(null);
+        } catch (error) {
+          if (!cancelled) {
+            setPdbContent(null);
+            setLoadedPdbPath(null);
+            setPdbResidueMessage(null);
+            setPdbLoadError(
+              error instanceof Error
+                ? error.message
+                : 'Could not load protein PDB from the given path.'
+            );
+          }
         }
-      } catch {
-        // Protein path may be unavailable in current environment
-      }
-    };
+      })();
+    }, 400);
 
-    void maybeLoadPdbContent();
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [config.protein_path, pdbContent, loadedPdbPath, invoke]);
+  }, [config.protein_path, invoke, loadedPdbPath, pdbContent]);
 
   const generatedBoltzYamlResult = useMemo(() => {
     if (!pdbContent) {
@@ -539,6 +566,12 @@ export default function ConfigBuilder({
       return;
     }
 
+    const runnerPathError = validateRunnerReadablePaths(config);
+    if (runnerPathError) {
+      setStartError(runnerPathError);
+      return;
+    }
+
     const parsedConfig = OptConfigSchema.safeParse(config);
     if (!parsedConfig.success) {
       setValidationErrors(
@@ -676,8 +709,7 @@ export default function ConfigBuilder({
               </CardContent>
             </Card>
 
-            <div className="grid flex-1 items-stretch gap-3 xl:grid-cols-2">
-              <div className="flex flex-col gap-3 xl:justify-between">
+            <div className="flex flex-1 flex-col gap-3">
 
             {/* Config management */}
             <Card className="h-fit rounded-md border-border/40 bg-transparent shadow-none">
@@ -711,6 +743,205 @@ export default function ConfigBuilder({
                   <div className="rounded-md border border-border bg-secondary/30 px-3 py-2 font-data text-[11px] text-muted-foreground">
                     {configPath}
                   </div>
+                ) : null}
+              </CardContent>
+            </Card>
+
+            {/* Input files */}
+            <Card className="h-fit rounded-md border-border/40 bg-transparent shadow-none">
+              <CardHeader className="p-3 pb-2">
+                <div className="flex items-center gap-2">
+                  <SectionIcon icon={Microscope} />
+                  <div>
+                    <CardTitle className="font-display text-sm">Input Files</CardTitle>
+                    <CardDescription className="text-xs">
+                      Protein and reference ligand inputs for {isFlashBindEngine ? 'FlashBind' : 'Boltz'}.
+                    </CardDescription>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-2 p-3 pt-0">
+                {webMode ? (
+                  <div className="rounded-md border border-border/60 bg-secondary/20 px-3 py-2 text-xs text-muted-foreground">
+                    Web mode uses runner-local paths. Type absolute or workspace-relative paths for
+                    inputs and directories, or use Convex uploads where available.
+                  </div>
+                ) : null}
+                <FileSelector
+                  label="Protein PDB"
+                  value={config.protein_path}
+                  onChange={(path) => setConfig((prev) => ({ ...prev, protein_path: path }))}
+                  onContentLoaded={(content) => setPdbContent(content)}
+                  fieldType="protein_pdb"
+                  fileType="pdb"
+                  accept=".pdb"
+                  placeholder="Select protein .pdb file"
+                  pathInputPlaceholder="/path/to/protein.pdb"
+                  onSelectLocal={handleSelectPdb}
+                  onReadLocalContent={async (path) => await invoke('file:read-pdb', path)}
+                  prepareFileForUpload={preparePdbFileForUpload}
+                  {...webPathInputProps}
+                />
+
+                {pdbResidueMessage ? (
+                  <div className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+                    {pdbResidueMessage}
+                  </div>
+                ) : null}
+
+                {pdbLoadError ? (
+                  <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                    {pdbLoadError}
+                    {webMode ? ' Restart the runner if you recently updated the app.' : null}
+                  </div>
+                ) : null}
+
+                <FileSelector
+                  label="Reference ligand"
+                  value={config.ref_ligand_path ?? ''}
+                  onChange={(path) =>
+                    setConfig((prev) => ({
+                      ...prev,
+                      ref_ligand_path: path || null,
+                    }))
+                  }
+                  onContentLoaded={(content) => setLigandContent(content)}
+                  fieldType="other"
+                  fileType="other"
+                  accept=".mol2,.sdf,.mol,.pdb,.cif,.mmcif"
+                  placeholder="Select reference ligand file"
+                  pathInputPlaceholder="/path/to/reference_ligand.sdf"
+                  optional
+                  onSelectLocal={handleSelectLigand}
+                  onReadLocalContent={async (path) => await invoke('file:read-text', path)}
+                  {...webPathInputProps}
+                />
+
+                {isFlashBindEngine ? (
+                  <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
+                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-amber-200">
+                      FlashBind Naming Constraint
+                    </p>
+                    <p className="text-xs text-amber-100/90">
+                      Protein and prots_json filenames must not contain spaces, special symbols, or underscores (_).
+                      Also ensure `protein_id` exactly matches the protein filename stem.
+                    </p>
+                  </div>
+                ) : null}
+
+                {isFlashBindEngine ? (
+                  <div className="space-y-1">
+                    <Label htmlFor="flashbind-protein-id" className="text-xs font-medium text-muted-foreground">
+                      FlashBind protein_id
+                    </Label>
+                    <Input
+                      id="flashbind-protein-id"
+                      value={config.flashbind?.protein_id ?? ''}
+                      onChange={(e) =>
+                        setConfig((prev) => ({
+                          ...prev,
+                          flashbind: {
+                            ...(prev.flashbind ?? defaultFlashBindConfig),
+                            protein_id: e.target.value.trim(),
+                          },
+                        }))
+                      }
+                      placeholder="Must match protein filename stem (e.g. NS5)"
+                      className="h-8 font-data"
+                    />
+                  </div>
+                ) : null}
+
+                {isFlashBindEngine ? (
+                  <FileSelector
+                    label="FlashBind prots_json"
+                    value={config.flashbind?.prots_json ?? ''}
+                    onChange={(path) =>
+                      setConfig((prev) => ({
+                        ...prev,
+                        flashbind: {
+                          ...(prev.flashbind ?? defaultFlashBindConfig),
+                          prots_json: path || null,
+                        },
+                      }))
+                    }
+                    fieldType="other"
+                    fileType="other"
+                    accept=".json"
+                    placeholder="Select FlashBind prots.json"
+                    pathInputPlaceholder="/path/to/prots.json"
+                    onSelectLocal={handleSelectProtsJson}
+                    onReadLocalContent={async (path) => await invoke('file:read-text', path)}
+                    {...webPathInputProps}
+                  />
+                ) : null}
+
+                {!isFlashBindEngine ? (
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium text-muted-foreground">Boltz YAML preview</Label>
+                  <div className="rounded-md border border-border bg-secondary/20 p-2">
+                    {generatedBoltzYamlResult.error ? (
+                      <p className="text-xs text-destructive">{generatedBoltzYamlResult.error}</p>
+                    ) : generatedBoltzYamlResult.yaml ? (
+                      <pre className="max-h-20 overflow-auto whitespace-pre-wrap break-all font-data text-[10px] leading-4 text-foreground/80">
+                        {generatedBoltzYamlResult.yaml}
+                      </pre>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Choose a protein PDB to preview.
+                      </p>
+                    )}
+                  </div>
+                </div>
+                ) : null}
+
+                {!isFlashBindEngine ? (
+                <div className="rounded-md border border-accent/30 bg-accent/10 p-2">
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <Label className="text-xs font-medium text-foreground">MSA file</Label>
+                    <Badge variant="warning" className="font-data text-[10px]">Optional</Badge>
+                  </div>
+                  <FileSelector
+                    label="Alignment input"
+                    value={config.boltz.msa_path ?? ''}
+                    onChange={(path) =>
+                      setConfig((prev) => ({
+                        ...prev,
+                        boltz: { ...prev.boltz, msa_path: path || null },
+                      }))
+                    }
+                    fieldType="msa"
+                    fileType="msa"
+                    accept=".a3m"
+                    placeholder="Select optional MSA file"
+                    pathInputPlaceholder="/path/to/alignment.a3m"
+                    optional
+                    onSelectLocal={handleSelectMsa}
+                    {...webPathInputProps}
+                  />
+                </div>
+                ) : null}
+
+                {!isFlashBindEngine ? (
+                <div className="space-y-1">
+                  <Label htmlFor="boltz-workers" className="text-xs font-medium text-muted-foreground">Boltz workers</Label>
+                  <Input
+                    id="boltz-workers"
+                    type="number"
+                    min={1}
+                    value={config.boltz.worker}
+                    onChange={(e) =>
+                      setConfig((prev) => ({
+                        ...prev,
+                        boltz: {
+                          ...prev.boltz,
+                          worker: normalizeBoltzWorker(e.target.value),
+                        },
+                      }))
+                    }
+                    className="h-8 font-data tabular-nums"
+                  />
+                </div>
                 ) : null}
               </CardContent>
             </Card>
@@ -875,187 +1106,6 @@ export default function ConfigBuilder({
               </CardContent>
             </Card>
 
-              </div>
-
-              <div className="flex flex-col gap-3 xl:justify-between">
-            {/* Input files */}
-            <Card className="h-fit rounded-md border-border/40 bg-transparent shadow-none">
-              <CardHeader className="p-3 pb-2">
-                <div className="flex items-center gap-2">
-                  <SectionIcon icon={Microscope} />
-                  <div>
-                    <CardTitle className="font-display text-sm">Input Files</CardTitle>
-                    <CardDescription className="text-xs">
-                      Protein and reference ligand inputs for {isFlashBindEngine ? 'FlashBind' : 'Boltz'}.
-                    </CardDescription>
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-2 p-3 pt-0">
-                <FileSelector
-                  label="Protein PDB"
-                  value={config.protein_path}
-                  onChange={(path) => setConfig((prev) => ({ ...prev, protein_path: path }))}
-                  onContentLoaded={(content) => setPdbContent(content)}
-                  fieldType="protein_pdb"
-                  fileType="pdb"
-                  accept=".pdb"
-                  placeholder="Select protein .pdb file"
-                  onSelectLocal={handleSelectPdb}
-                  onReadLocalContent={async (path) => await invoke('file:read-pdb', path)}
-                  prepareFileForUpload={preparePdbFileForUpload}
-                />
-
-                {pdbResidueMessage ? (
-                  <div className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-                    {pdbResidueMessage}
-                  </div>
-                ) : null}
-
-                <FileSelector
-                  label="Reference ligand"
-                  value={config.ref_ligand_path ?? ''}
-                  onChange={(path) =>
-                    setConfig((prev) => ({
-                      ...prev,
-                      ref_ligand_path: path || null,
-                    }))
-                  }
-                  onContentLoaded={(content) => setLigandContent(content)}
-                  fieldType="other"
-                  fileType="other"
-                  accept=".mol2,.sdf,.mol,.pdb,.cif,.mmcif"
-                  placeholder="Select reference ligand file"
-                  optional
-                  onSelectLocal={handleSelectLigand}
-                  onReadLocalContent={async (path) => await invoke('file:read-text', path)}
-                />
-
-                {isFlashBindEngine ? (
-                  <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
-                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-amber-200">
-                      FlashBind Naming Constraint
-                    </p>
-                    <p className="text-xs text-amber-100/90">
-                      Protein and prots_json filenames must not contain spaces, special symbols, or underscores (_).
-                      Also ensure `protein_id` exactly matches the protein filename stem.
-                    </p>
-                  </div>
-                ) : null}
-
-                {isFlashBindEngine ? (
-                  <div className="space-y-1">
-                    <Label htmlFor="flashbind-protein-id" className="text-xs font-medium text-muted-foreground">
-                      FlashBind protein_id
-                    </Label>
-                    <Input
-                      id="flashbind-protein-id"
-                      value={config.flashbind?.protein_id ?? ''}
-                      onChange={(e) =>
-                        setConfig((prev) => ({
-                          ...prev,
-                          flashbind: {
-                            ...(prev.flashbind ?? defaultFlashBindConfig),
-                            protein_id: e.target.value.trim(),
-                          },
-                        }))
-                      }
-                      placeholder="Must match protein filename stem (e.g. NS5)"
-                      className="h-8 font-data"
-                    />
-                  </div>
-                ) : null}
-
-                {isFlashBindEngine ? (
-                  <FileSelector
-                    label="FlashBind prots_json"
-                    value={config.flashbind?.prots_json ?? ''}
-                    onChange={(path) =>
-                      setConfig((prev) => ({
-                        ...prev,
-                        flashbind: {
-                          ...(prev.flashbind ?? defaultFlashBindConfig),
-                          prots_json: path || null,
-                        },
-                      }))
-                    }
-                    fieldType="other"
-                    fileType="other"
-                    accept=".json"
-                    placeholder="Select FlashBind prots.json"
-                    onSelectLocal={handleSelectProtsJson}
-                    onReadLocalContent={async (path) => await invoke('file:read-text', path)}
-                  />
-                ) : null}
-
-                {!isFlashBindEngine ? (
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium text-muted-foreground">Boltz YAML preview</Label>
-                  <div className="rounded-md border border-border bg-secondary/20 p-2">
-                    {generatedBoltzYamlResult.error ? (
-                      <p className="text-xs text-destructive">{generatedBoltzYamlResult.error}</p>
-                    ) : generatedBoltzYamlResult.yaml ? (
-                      <pre className="max-h-20 overflow-auto whitespace-pre-wrap break-all font-data text-[10px] leading-4 text-foreground/80">
-                        {generatedBoltzYamlResult.yaml}
-                      </pre>
-                    ) : (
-                      <p className="text-xs text-muted-foreground">
-                        Choose a protein PDB to preview.
-                      </p>
-                    )}
-                  </div>
-                </div>
-                ) : null}
-
-                {!isFlashBindEngine ? (
-                <div className="rounded-md border border-accent/30 bg-accent/10 p-2">
-                  <div className="mb-2 flex items-center justify-between gap-3">
-                    <Label className="text-xs font-medium text-foreground">MSA file</Label>
-                    <Badge variant="warning" className="font-data text-[10px]">Optional</Badge>
-                  </div>
-                  <FileSelector
-                    label="Alignment input"
-                    value={config.boltz.msa_path ?? ''}
-                    onChange={(path) =>
-                      setConfig((prev) => ({
-                        ...prev,
-                        boltz: { ...prev.boltz, msa_path: path || null },
-                      }))
-                    }
-                    fieldType="msa"
-                    fileType="msa"
-                    accept=".a3m"
-                    placeholder="Select optional MSA file"
-                    optional
-                    onSelectLocal={handleSelectMsa}
-                  />
-                </div>
-                ) : null}
-
-                {!isFlashBindEngine ? (
-                <div className="space-y-1">
-                  <Label htmlFor="boltz-workers" className="text-xs font-medium text-muted-foreground">Boltz workers</Label>
-                  <Input
-                    id="boltz-workers"
-                    type="number"
-                    min={1}
-                    value={config.boltz.worker}
-                    onChange={(e) =>
-                      setConfig((prev) => ({
-                        ...prev,
-                        boltz: {
-                          ...prev.boltz,
-                          worker: normalizeBoltzWorker(e.target.value),
-                        },
-                      }))
-                    }
-                    className="h-8 font-data tabular-nums"
-                  />
-                </div>
-                ) : null}
-              </CardContent>
-            </Card>
-
             {/* Directories */}
             <Card className="h-fit rounded-md border-border/40 bg-transparent shadow-none">
               <CardHeader className="p-3 pb-2">
@@ -1076,11 +1126,19 @@ export default function ConfigBuilder({
                       value={config.result_dir}
                       onChange={(e) => setConfig((prev) => ({ ...prev, result_dir: e.target.value }))}
                       className="h-8 font-data text-xs"
+                      placeholder={webMode ? '/path/to/result_dir' : undefined}
                     />
-                    <Button variant="outline" size="icon" className="h-8 w-8" onClick={handleSelectResultDir}>
-                      <FolderOpen className="h-4 w-4" />
-                    </Button>
+                    {!webMode ? (
+                      <Button variant="outline" size="icon" className="h-8 w-8" onClick={handleSelectResultDir}>
+                        <FolderOpen className="h-4 w-4" />
+                      </Button>
+                    ) : null}
                   </div>
+                  {webMode ? (
+                    <p className="text-[11px] text-muted-foreground">
+                      Type a directory path accessible to the local runner.
+                    </p>
+                  ) : null}
                 </div>
 
                 <div className="space-y-1">
@@ -1091,11 +1149,19 @@ export default function ConfigBuilder({
                       value={config.env_dir}
                       onChange={(e) => setConfig((prev) => ({ ...prev, env_dir: e.target.value }))}
                       className="h-8 font-data text-xs"
+                      placeholder={webMode ? '/path/to/env_dir' : undefined}
                     />
-                    <Button variant="outline" size="icon" className="h-8 w-8" onClick={handleSelectEnvDir}>
-                      <FolderOpen className="h-4 w-4" />
-                    </Button>
+                    {!webMode ? (
+                      <Button variant="outline" size="icon" className="h-8 w-8" onClick={handleSelectEnvDir}>
+                        <FolderOpen className="h-4 w-4" />
+                      </Button>
+                    ) : null}
                   </div>
+                  {webMode ? (
+                    <p className="text-[11px] text-muted-foreground">
+                      Type a directory path accessible to the local runner.
+                    </p>
+                  ) : null}
                 </div>
               </CardContent>
             </Card>
@@ -1193,7 +1259,6 @@ export default function ConfigBuilder({
                 ) : null}
               </CardContent>
             </Card>
-              </div>
             </div>
           </div>
         </ScrollArea>
